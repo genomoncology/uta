@@ -150,7 +150,7 @@ you will not need to install PostgreSQL or any of its dependencies.
 2.  Define the UTA version to download. A list of available versions
     can be found [here](https://hub.docker.com/r/biocommons/uta/tags):
 
-        $ uta_v=uta_20210129b
+        $ uta_v=uta_20241220
 
     This variable is used only for consistency in the examples that
     follow. Defining this variable is not required for any other reason.
@@ -252,7 +252,7 @@ the installation environment.*
 
 3.  Restore the database.
 
-        $ uta_v=uta_20210129b
+        $ uta_v=uta_20241220
         $ gzip -cdq $uta_v.pgd.gz | psql -U uta_admin -1 -v ON_ERROR_STOP=1 -d uta -Eae
 
 ## Developer Setup
@@ -312,9 +312,9 @@ mkdir -p $(pwd)/output/logs
 
 Set variables:
 ```
-export UTA_ETL_OLD_UTA_IMAGE_TAG=uta_20210129b
+export UTA_ETL_OLD_UTA_IMAGE_TAG=uta_20240512
 export UTA_ETL_OLD_UTA_VERSION=UTA_ETL_OLD_UTA_IMAGE_TAG
-export UTA_ETL_NEW_UTA_VERSION=uta_20240512
+export UTA_ETL_NEW_UTA_VERSION=uta_20241220
 export UTA_ETL_NCBI_DIR=./ncbi-data
 export UTA_ETL_WORK_DIR=./output/artifacts
 export UTA_ETL_LOG_DIR=./output/logs
