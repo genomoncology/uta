@@ -188,15 +188,16 @@ you will not need to install PostgreSQL or any of its dependencies.
            -d \
            -e POSTGRES_PASSWORD=some-password-that-you-make-up \
            -v $uta_v:/var/lib/postgresql/data \
-           -v $(pwd)/$uta_v.pgd.gz:/tmp/$uta_v.pgd.gz:ro \
+           --mount type=bind,source="$(pwd)/$uta_v.pgd.gz",target="/tmp/$uta_v.pgd.gz",readonly \
            --name $uta_v \
            -p 127.0.0.1:5432:5432 \
            biocommons/uta:$uta_v
 
     The first time you run this image, it will initialize a PostgreSQL database from the snapshot.
 
-    The next time you run the image, you do not need to pass `-v $(pwd)/$uta_v.pgd.gz:/tmp/$uta_v.pgd.gz:ro`,
-    since the database is already initialized.
+    On subsequent runs, you can run the container by:
+
+        $ docker start $uta_v
 
     `-d` starts the container in daemon (background) mode. To see
     progress:
