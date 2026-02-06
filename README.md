@@ -167,23 +167,36 @@ you will not need to install PostgreSQL or any of its dependencies.
 
     This process will likely take 1-3 minutes.
 
-4.  Run the image:
+4.  To prevent bot scraping of the biocommons.org hosting site, you must navigate
+    to the downloads site https://dl.biocommons.org/uta/ in a web browser, and click to
+    download the desired database snapshot file (ends in `.pgd.gz`). For example, for
+    `$uta_v=uta_20241220`, that would be `uta_20241220.pgd.gz`.
+
+    You can choose where to download it to from your browser or move it after
+    downloading. You will use this path in the next step, to pass this file into
+    the UTA docker container in order to initialize the database in the `$uta_v`
+    volume. After initialized, you can delete the snapshot file.
+
+5.  Run the image, using the path you have the snapshot saved to. For example
+    `/path/to/snapshot/uta_20241220.pgd.gz`. The command below expects it to be in the
+    same directory that you run the command from. If you do not already have a docker
+    volume called `$uta_v`, the `docker run` command below will create it automatically.
+    If you want to bind the postgres server to a port other than the default `5432`,
+    you can change the `-p` option below to use some other number like `5555` (`-p 127.0.0.1:5555:5432`).
 
         $ docker run \
            -d \
            -e POSTGRES_PASSWORD=some-password-that-you-make-up \
-           -v uta-dl-cache:/tmp \
-           -v uta_vol:/var/lib/postgresql/data \
+           -v $uta_v:/var/lib/postgresql/data \
+           -v $(pwd)/$uta_v.pgd.gz:/tmp/$uta_v.pgd.gz:ro \
            --name $uta_v \
-           --network=host \
+           -p 127.0.0.1:5432:5432 \
            biocommons/uta:$uta_v
 
-    The first time you run this image, it will initialize a PostgreSQL
-    database cluster, then download a database dump from biocommons and install it.
+    The first time you run this image, it will initialize a PostgreSQL database from the snapshot.
 
-    The uta container stages the postgres dump archive into the `/tmp` directory.
-    Putting that in another volume called `uta-dl-cache` is helpful because it lets
-    you re-build the database without having to re-download the postgres dump archive.
+    The next time you run the image, you do not need to pass `-v $(pwd)/$uta_v.pgd.gz:/tmp/$uta_v.pgd.gz:ro`,
+    since the database is already initialized.
 
     `-d` starts the container in daemon (background) mode. To see
     progress:
@@ -200,13 +213,14 @@ you will not need to install PostgreSQL or any of its dependencies.
     Hit Ctrl-C to stop watching logs. The container will still be
     running.
 
-5.  Test your installation
+6.  Test your installation.
 
     With the test commands below, you should see a table dump with at
     least 4 lines showing schema_version, create date, license, and uta
-    (code) version used to build the instance.
+    (code) version used to build the instance. If you mapped the container to
+    a port other than `5432`, change the `-p` option below (e.g. `-p 5555`).
 
-        $ psql -h localhost -U anonymous -d uta -c "select * from $uta_v.meta"
+        $ psql -h localhost -U anonymous -d uta -p 5432 -c "select * from $uta_v.meta"
 
               key       |                               value
         ----------------+--------------------------------------------------------------------
@@ -216,7 +230,7 @@ you will not need to install PostgreSQL or any of its dependencies.
          uta version    | 0.2.0a2.dev11+n52ed6e969cfc
          (4 rows)
 
-6.  (Optional) To configure [hgvs](https://github.com/biocommons/hgvs)
+7.  (Optional) To configure [hgvs](https://github.com/biocommons/hgvs)
     to use this local installation, consult the
     [hgvs documentation](https://hgvs.readthedocs.io/en/latest/installation.html#local-installation-of-uta-optional)
 
