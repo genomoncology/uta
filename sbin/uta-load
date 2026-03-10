@@ -15,6 +15,11 @@ dest_uta_v=$2
 ncbi_dir=$3
 working_dir=$4
 log_dir=$5
+pg_host=${UTA_ETL_PGHOST:-localhost}
+pg_port=${UTA_ETL_PGPORT:-5432}
+pg_user=${UTA_ETL_PGUSER:-uta_admin}
+pg_db=${UTA_ETL_PGDATABASE:-uta}
+pg_pass=${UTA_ETL_PGPASS:-}
 
 if [ -z "$source_uta_v" ] || [ -z "$dest_uta_v" ] || [ -z "$ncbi_dir" ] || [ -z "$working_dir" ] || [ -z "$log_dir" ]
 then
@@ -25,6 +30,17 @@ fi
 # set local variables and create working directories
 loading_uta_v="uta"
 mkdir -p "$log_dir"
+loading_conf=$(mktemp)
+trap 'rm -f "$loading_conf"' EXIT
+cat > "$loading_conf" <<EOF
+[uta]
+hostport = $pg_host:$pg_port
+user = $pg_user
+pass = $pg_pass
+database = $pg_db
+admin_role = $pg_user
+EOF
+export UTA_ALEMBIC_DB_URL="postgresql://$pg_user:$pg_pass@$pg_host:$pg_port/$pg_db"
 
 ## Drop loading schema, and recreate
 etc/scripts/delete-schema.sh "$loading_uta_v"
@@ -32,7 +48,7 @@ etc/scripts/create-new-schema.sh "$source_uta_v" "$loading_uta_v"
 
 ## apply any outstanding alembic migrations and update schema version if necessary
 alembic -c etc/alembic.ini upgrade head
-uta --conf=etc/global.conf --conf=etc/uta_dev@localhost.conf update-meta-data
+uta --conf=etc/global.conf --conf="$loading_conf" update-meta-data
 
 # generate seqinfo files from exonsets (this step requires seqrepo)
 sbin/exonset-to-seqinfo -o NCBI "$working_dir/exonsets.gz" | gzip -c > "$working_dir/seqinfo.gz" 2>&1 | \
@@ -43,34 +59,42 @@ sbin/assoc-acs-merge "$working_dir/assocacs.gz" | gzip -c > "$working_dir/assoc-
     tee "$log_dir/assoc-acs-merge.log"
 
 # Load genes into gene table.
-uta --conf=etc/global.conf --conf=etc/uta_dev@localhost.conf load-geneinfo "$working_dir/geneinfo.gz" 2>&1 | \
+uta --conf=etc/global.conf --conf="$loading_conf" load-geneinfo "$working_dir/geneinfo.gz" 2>&1 | \
     tee "$log_dir/load-geneinfo.log"
 
 # Load accessions into associated_accessions table.
-uta --conf=etc/global.conf --conf=etc/uta_dev@localhost.conf load-assoc-ac "$working_dir/assoc-ac.gz" 2>&1 | \
+uta --conf=etc/global.conf --conf="$loading_conf" load-assoc-ac "$working_dir/assoc-ac.gz" 2>&1 | \
     tee "$log_dir/load-assoc-ac.log"
 
 # Load transcript info into transcript and exon_set tables.
-uta --conf=etc/global.conf --conf=etc/uta_dev@localhost.conf load-txinfo "$working_dir/txinfo.gz" 2>&1 | \
+uta --conf=etc/global.conf --conf="$loading_conf" load-txinfo "$working_dir/txinfo.gz" 2>&1 | \
     tee "$log_dir/load-txinfo.log"
 
 # Load exon sets into into exon_set and exon tables.
-uta --conf=etc/global.conf --conf=etc/uta_dev@localhost.conf load-exonset "$working_dir/exonsets.gz" 2>&1 | \
+uta --conf=etc/global.conf --conf="$loading_conf" load-exonset "$working_dir/exonsets.gz" 2>&1 | \
     tee "$log_dir/load-exonsets.log"
 
+# Pair archived historical exon sets to their matching transcript lineages.
+uta --conf=etc/global.conf --conf="$loading_conf" pair-historical-exonsets 2>&1 | \
+    tee "$log_dir/pair-historical-exonsets.log"
+
+# Validate that historical archived exon sets do not have unresolved lineage pairing.
+uta --conf=etc/global.conf --conf="$loading_conf" validate-historical-exonset-pairings 2>&1 | \
+    tee "$log_dir/validate-historical-exonset-pairings.log"
+
 # Load seqinfo into the seq and seqanno tables.
-uta --conf=etc/global.conf --conf=etc/uta_dev@localhost.conf load-seqinfo "$working_dir/seqinfo.gz" 2>&1 | \
+uta --conf=etc/global.conf --conf="$loading_conf" load-seqinfo "$working_dir/seqinfo.gz" 2>&1 | \
     tee "$log_dir/load-seqinfo.log"
 
 # Create cigar strings for all rows in tx_alt_exon_pairs_v view and update exon_aln table.
-uta --conf=etc/global.conf --conf=etc/uta_dev@localhost.conf align-exons 2>&1 | \
+uta --conf=etc/global.conf --conf="$loading_conf" align-exons 2>&1 | \
     tee "$log_dir/align-exons.log"
 
 ### run diff
 sbin/uta-diff "$source_uta_v" "$loading_uta_v"
 
 ## Rename schema to destination schema name and export to dump file
-psql -h localhost -U uta_admin -d uta -c "DROP SCHEMA IF EXISTS $dest_uta_v CASCADE;"
-psql -h localhost -U uta_admin -d uta -c "ALTER SCHEMA uta RENAME TO $dest_uta_v";
-pg_dump -h localhost -U uta_admin -d uta -n "$dest_uta_v" | \
+psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_db" -c "DROP SCHEMA IF EXISTS $dest_uta_v CASCADE;"
+psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_db" -c "ALTER SCHEMA uta RENAME TO $dest_uta_v";
+pg_dump -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_db" -n "$dest_uta_v" | \
  gzip -c > "$working_dir/$dest_uta_v.pgd.gz"

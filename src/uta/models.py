@@ -251,6 +251,32 @@ class ExonAln(Base):
     # methods:
 
 
+class ExonSetPair(Base):
+    __tablename__ = "exon_set_pair"
+
+    alt_exon_set_id = sa.Column(
+        sa.Integer,
+        sa.ForeignKey("exon_set.exon_set_id", onupdate="CASCADE", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tx_exon_set_id = sa.Column(
+        sa.Integer,
+        sa.ForeignKey("exon_set.exon_set_id", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    added = sa.Column(
+        sa.DateTime, default=datetime.datetime.now(), nullable=False
+    )
+
+    alt_exon_set = sao.relationship(
+        "ExonSet", foreign_keys=[alt_exon_set_id], backref="paired_tx_exon_set"
+    )
+    tx_exon_set = sao.relationship(
+        "ExonSet", foreign_keys=[tx_exon_set_id], backref="paired_alt_exon_sets"
+    )
+
+
 class AssociatedAccessions(Base):
     __tablename__ = "associated_accessions"
     __table_args__ = (
