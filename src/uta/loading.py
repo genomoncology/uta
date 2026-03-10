@@ -166,6 +166,402 @@ def analyze(session, opts, cf):
     session.commit()
 
 
+def _plain_alt_exon_count_mismatch_rows(session):
+    sql = text(
+        """
+        with transcript_counts as (
+            select tx_ac, n_exons as tx_n_exons
+            from exon_set_exons_v
+            where alt_ac = tx_ac and alt_aln_method = 'transcript'
+        )
+        select
+            ese.tx_ac,
+            tc.tx_n_exons,
+            ese.alt_ac,
+            ese.alt_aln_method,
+            ese.n_exons as alt_n_exons,
+            ese.exon_set_id
+        from exon_set_exons_v ese
+        join transcript_counts tc using (tx_ac)
+        where ese.alt_ac <> ese.tx_ac
+          and ese.alt_aln_method not like '%/%'
+          and not exists (
+              select 1
+              from {schema}.exon_set_pair esp
+              where esp.alt_exon_set_id = ese.exon_set_id
+          )
+          and ese.n_exons <> tc.tx_n_exons
+        order by ese.tx_ac, ese.alt_ac, ese.alt_aln_method
+        """.format(schema=usam.schema_name)
+    )
+    return list(session.execute(sql).mappings())
+
+
+def _stale_overlay_mismatch_rows(session):
+    sql = text(
+        """
+        with transcript_counts as (
+            select tx_ac, n_exons as tx_n_exons
+            from exon_set_exons_v
+            where alt_ac = tx_ac and alt_aln_method = 'transcript'
+        )
+        select
+            ese.tx_ac,
+            tc.tx_n_exons,
+            ese.alt_ac,
+            ese.alt_aln_method,
+            ese.n_exons as alt_n_exons,
+            ese.exon_set_id
+        from exon_set_exons_v ese
+        join transcript_counts tc using (tx_ac)
+        where ese.alt_ac <> ese.tx_ac
+          and ese.alt_aln_method not like '%/%'
+          and not exists (
+              select 1
+              from {schema}.exon_set_pair esp
+              where esp.alt_exon_set_id = ese.exon_set_id
+          )
+          and ese.n_exons <> tc.tx_n_exons
+          and exists (
+              select 1
+              from exon_set tx_hist
+              where tx_hist.tx_ac = ese.tx_ac
+                and tx_hist.alt_ac = ese.tx_ac
+                and tx_hist.alt_aln_method like 'transcript/%'
+          )
+        order by ese.tx_ac, ese.alt_ac, ese.alt_aln_method
+        """.format(schema=usam.schema_name)
+    )
+    return list(session.execute(sql).mappings())
+
+
+def _hashed_alt_promotion_candidates(session):
+    sql = text(
+        """
+        with transcript_counts as (
+            select tx_ac, n_exons as tx_n_exons
+            from exon_set_exons_v
+            where alt_ac = tx_ac and alt_aln_method = 'transcript'
+        ),
+        candidates as (
+            select
+                ese.exon_set_id,
+                ese.tx_ac,
+                ese.alt_ac,
+                ese.alt_aln_method,
+                regexp_replace(ese.alt_aln_method, '/.*$', '') as base_method,
+                ese.n_exons,
+                count(*) over (
+                    partition by
+                        ese.tx_ac,
+                        ese.alt_ac,
+                        regexp_replace(ese.alt_aln_method, '/.*$', '')
+                ) as family_match_count
+            from exon_set_exons_v ese
+            join transcript_counts tc using (tx_ac)
+            where ese.alt_ac <> ese.tx_ac
+              and ese.alt_aln_method like '%/%'
+              and ese.n_exons = tc.tx_n_exons
+              and exists (
+                  select 1
+                  from exon_set tx_hist
+                  where tx_hist.tx_ac = ese.tx_ac
+                    and tx_hist.alt_ac = ese.tx_ac
+                    and tx_hist.alt_aln_method like 'transcript/%'
+              )
+              and not exists (
+                  select 1
+                  from exon_set plain
+                  where plain.tx_ac = ese.tx_ac
+                    and plain.alt_ac = ese.alt_ac
+                    and plain.alt_aln_method = regexp_replace(ese.alt_aln_method, '/.*$', '')
+              )
+        )
+        select *
+        from candidates
+        where family_match_count = 1
+        order by tx_ac, alt_ac, base_method
+        """
+    )
+    return list(session.execute(sql).mappings())
+
+
+def _historical_pair_status_rows(session):
+    pair_table = "{schema}.exon_set_pair".format(schema=usam.schema_name)
+    sql = text(
+        """
+        with plain_transcripts as (
+            select tx_ac, exon_set_id as plain_tx_exon_set_id, n_exons as plain_tx_n_exons
+            from exon_set_exons_v
+            where alt_ac = tx_ac and alt_aln_method = 'transcript'
+        ),
+        transcript_lineages as (
+            select tx_ac, exon_set_id as tx_exon_set_id, alt_aln_method as tx_aln_method, n_exons
+            from exon_set_exons_v
+            where alt_ac = tx_ac and alt_aln_method like 'transcript%'
+        ),
+        archived_alt_lineages as (
+            select
+                alt.tx_ac,
+                alt.alt_ac,
+                alt.alt_aln_method,
+                alt.exon_set_id as alt_exon_set_id,
+                alt.n_exons as alt_n_exons
+            from exon_set_exons_v alt
+            join plain_transcripts pt on alt.tx_ac = pt.tx_ac
+            where alt.alt_ac <> alt.tx_ac
+              and alt.alt_aln_method like '%/%'
+              and alt.alt_aln_method not like 'transcript%'
+              and alt.n_exons <> pt.plain_tx_n_exons
+        ),
+        candidates as (
+            select
+                alt.tx_ac,
+                alt.alt_ac,
+                alt.alt_aln_method,
+                alt.alt_exon_set_id,
+                alt.alt_n_exons,
+                t.tx_exon_set_id,
+                t.tx_aln_method,
+                count(t.tx_exon_set_id) over (partition by alt.alt_exon_set_id) as candidate_count
+            from archived_alt_lineages alt
+            left join transcript_lineages t
+              on t.tx_ac = alt.tx_ac
+             and t.n_exons = alt.alt_n_exons
+        )
+        select
+            c.tx_ac,
+            c.alt_ac,
+            c.alt_aln_method,
+            c.alt_exon_set_id,
+            c.alt_n_exons,
+            c.tx_exon_set_id,
+            c.tx_aln_method,
+            c.candidate_count,
+            esp.tx_exon_set_id as paired_tx_exon_set_id
+        from candidates c
+        left join {pair_table} esp on esp.alt_exon_set_id = c.alt_exon_set_id
+        order by c.tx_ac, c.alt_ac, c.alt_aln_method, c.tx_aln_method
+        """.format(pair_table=pair_table)
+    )
+    return list(session.execute(sql).mappings())
+
+
+def _historical_pair_candidates(session):
+    return [
+        row
+        for row in _historical_pair_status_rows(session)
+        if row["candidate_count"] == 1 and row["paired_tx_exon_set_id"] is None
+    ]
+
+
+def _paired_historical_promotion_candidates(session):
+    pair_table = "{schema}.exon_set_pair".format(schema=usam.schema_name)
+    sql = text(
+        """
+        select
+            ese.exon_set_id,
+            ese.tx_ac,
+            ese.alt_ac,
+            ese.alt_aln_method,
+            regexp_replace(ese.alt_aln_method, '/.*$', '') as base_method
+        from exon_set_exons_v ese
+        join {pair_table} esp on esp.alt_exon_set_id = ese.exon_set_id
+        where ese.alt_ac <> ese.tx_ac
+          and ese.alt_aln_method like '%/%'
+          and ese.alt_aln_method not like 'transcript%'
+          and not exists (
+              select 1
+              from exon_set plain
+              where plain.tx_ac = ese.tx_ac
+                and plain.alt_ac = ese.alt_ac
+                and plain.alt_aln_method = regexp_replace(ese.alt_aln_method, '/.*$', '')
+          )
+        order by ese.tx_ac, ese.alt_ac, ese.alt_aln_method
+        """.format(pair_table=pair_table)
+    )
+    return list(session.execute(sql).mappings())
+
+
+def _unresolved_historical_pair_rows(session):
+    unresolved = {}
+    for row in _historical_pair_status_rows(session):
+        alt_exon_set_id = row["alt_exon_set_id"]
+        if row["paired_tx_exon_set_id"] is not None:
+            continue
+        unresolved.setdefault(alt_exon_set_id, row)
+    return list(unresolved.values())
+
+
+def validate_exon_set_consistency(session, opts, cf):
+    session.execute(text("set role {admin_role};".format(
+        admin_role=cf.get("uta", "admin_role"))))
+    session.execute(text("set search_path = " + usam.schema_name))
+
+    mismatch_rows = _plain_alt_exon_count_mismatch_rows(session)
+    stale_overlay_rows = _stale_overlay_mismatch_rows(session)
+    logger.info("plain-alt exon-count mismatches: %s", len(mismatch_rows))
+    logger.info("stale-overlay mismatches: %s", len(stale_overlay_rows))
+    for row in stale_overlay_rows[:20]:
+        logger.warning(
+            "%s %s/%s transcript_exons=%s alt_exons=%s",
+            row["tx_ac"],
+            row["alt_ac"],
+            row["alt_aln_method"],
+            row["tx_n_exons"],
+            row["alt_n_exons"],
+        )
+    if stale_overlay_rows:
+        raise RuntimeError(
+            "Found {} stale transcript/genome exon-set overlay mismatches".format(len(stale_overlay_rows))
+        )
+
+
+def pair_historical_exon_sets(session, opts, cf):
+    session.execute(text("set role {admin_role};".format(
+        admin_role=cf.get("uta", "admin_role"))))
+    session.execute(text("set search_path = " + usam.schema_name))
+
+    candidate_rows = _historical_pair_candidates(session)
+    logger.info("historical exon-set pairing candidates: %s", len(candidate_rows))
+    paired = 0
+    for row in candidate_rows:
+        pair, created = _get_or_insert(
+            session=session,
+            table=usam.ExonSetPair,
+            row={
+                "alt_exon_set_id": row["alt_exon_set_id"],
+                "tx_exon_set_id": row["tx_exon_set_id"],
+            },
+            row_identifier=("alt_exon_set_id",),
+        )
+        if created:
+            logger.warning(
+                "Pairing historical exon set %s/%s method %s to transcript lineage %s",
+                row["tx_ac"],
+                row["alt_ac"],
+                row["alt_aln_method"],
+                row["tx_aln_method"],
+            )
+            paired += 1
+        else:
+            if pair.tx_exon_set_id != row["tx_exon_set_id"]:
+                raise RuntimeError(
+                    "Historical exon set {} is already paired to {} instead of {}".format(
+                        row["alt_exon_set_id"], pair.tx_exon_set_id, row["tx_exon_set_id"]
+                    )
+                )
+            logger.info(
+                "Historical exon set %s/%s already paired",
+                row["tx_ac"],
+                row["alt_ac"],
+            )
+    session.commit()
+
+    promotion_rows = _paired_historical_promotion_candidates(session)
+    logger.info("promoting %s paired historical exon sets to plain methods", len(promotion_rows))
+    for row in promotion_rows:
+        exon_set = session.query(usam.ExonSet).filter(
+            usam.ExonSet.exon_set_id == row["exon_set_id"]
+        ).one()
+        logger.warning(
+            "Promoting paired historical exon set %s/%s method %s to %s",
+            row["tx_ac"],
+            row["alt_ac"],
+            row["alt_aln_method"],
+            row["base_method"],
+        )
+        exon_set.alt_aln_method = row["base_method"]
+    session.commit()
+
+    unresolved_rows = _unresolved_historical_pair_rows(session)
+    logger.info("unresolved historical exon-set pairs after pairing: %s", len(unresolved_rows))
+    for row in unresolved_rows[:20]:
+        logger.warning(
+            "Unresolved historical exon set %s/%s method %s with %s compatible transcript lineages",
+            row["tx_ac"],
+            row["alt_ac"],
+            row["alt_aln_method"],
+            row["candidate_count"],
+        )
+
+
+def validate_historical_exon_set_pairings(session, opts, cf):
+    session.execute(text("set role {admin_role};".format(
+        admin_role=cf.get("uta", "admin_role"))))
+    session.execute(text("set search_path = " + usam.schema_name))
+
+    unresolved_rows = _unresolved_historical_pair_rows(session)
+    logger.info("unresolved historical exon-set pairs: %s", len(unresolved_rows))
+    for row in unresolved_rows[:20]:
+        logger.warning(
+            "%s %s/%s alt_exons=%s candidate_count=%s",
+            row["tx_ac"],
+            row["alt_ac"],
+            row["alt_aln_method"],
+            row["alt_n_exons"],
+            row["candidate_count"],
+        )
+    if unresolved_rows:
+        raise RuntimeError(
+            "Found {} unresolved historical exon-set pairings".format(len(unresolved_rows))
+        )
+
+
+def repair_stale_exon_set_overlays(session, opts, cf):
+    session.execute(text("set role {admin_role};".format(
+        admin_role=cf.get("uta", "admin_role"))))
+    session.execute(text("set search_path = " + usam.schema_name))
+
+    mismatch_rows = _plain_alt_exon_count_mismatch_rows(session)
+    stale_overlay_rows = _stale_overlay_mismatch_rows(session)
+    logger.info("plain-alt exon-count mismatches before repair: %s", len(mismatch_rows))
+    logger.info("stale-overlay mismatches before repair: %s", len(stale_overlay_rows))
+    logger.info("archiving %s stale-overlay plain exon sets", len(stale_overlay_rows))
+    archived = 0
+    for row in stale_overlay_rows:
+        exon_set = session.query(usam.ExonSet).filter(
+            usam.ExonSet.exon_set_id == row["exon_set_id"]
+        ).one()
+        _archive_exon_set_record(session, exon_set)
+        archived += 1
+    session.commit()
+
+    promotion_rows = _hashed_alt_promotion_candidates(session)
+    logger.info("promoting %s hashed exon sets back to plain", len(promotion_rows))
+    promoted = 0
+    for row in promotion_rows:
+        exon_set = session.query(usam.ExonSet).filter(
+            usam.ExonSet.exon_set_id == row["exon_set_id"]
+        ).one()
+        logger.warning(
+            "Promoting exon set %s/%s method %s to %s",
+            row["tx_ac"],
+            row["alt_ac"],
+            row["alt_aln_method"],
+            row["base_method"],
+        )
+        exon_set.alt_aln_method = row["base_method"]
+        promoted += 1
+    session.commit()
+
+    pair_historical_exon_sets(session, opts, cf)
+
+    refresh_matviews(session, opts, cf)
+    logger.info("repair summary: archived=%s promoted=%s", archived, promoted)
+
+    remaining_mismatches = _plain_alt_exon_count_mismatch_rows(session)
+    remaining_stale_overlay_rows = _stale_overlay_mismatch_rows(session)
+    logger.info("remaining plain-alt exon-count mismatches: %s", len(remaining_mismatches))
+    logger.info("remaining stale-overlay mismatches: %s", len(remaining_stale_overlay_rows))
+    if remaining_stale_overlay_rows:
+        raise RuntimeError(
+            "Repair incomplete; {} stale-overlay mismatches remain".format(len(remaining_stale_overlay_rows))
+        )
+    validate_historical_exon_set_pairings(session, opts, cf)
+
+
+
 def create_schema(session, opts, cf):
     """Create and populate initial schema"""
     session.execute(text("set role {admin_role};".format(
@@ -668,7 +1064,12 @@ def load_sql(session, opts, cf):
 
     for fn in opts["FILES"]:
         logger.info("loading " + fn)
-        session.execute(open(fn).read())
+        with open(fn) as f:
+            cur = session.connection().connection.cursor()
+            try:
+                cur.execute(f.read())
+            finally:
+                cur.close()
     session.commit()
 
 
@@ -803,6 +1204,7 @@ def load_txinfo(session, opts, cf):
             n_new += 1
         elif no == (True, True):
             logger.warning("Transcript {ti.ac} exon structure changed".format(ti=ti))
+            _archive_plain_alt_exon_sets(session, ti.ac)
             n_exons_changed += 1
         elif no == (False, True):
             logger.debug("Transcript {ti.ac} exon structure unchanged".format(ti=ti))
@@ -815,6 +1217,75 @@ def load_txinfo(session, opts, cf):
                 i_ti=i_ti, n_rows=n_rows,
                 n_new=n_new, n_unchanged=n_unchanged, n_cds_changed=n_cds_changed, n_exons_changed=n_exons_changed,
                 p=(i_ti + 1) / n_rows * 100))
+
+
+def _archive_plain_alt_exon_sets(session, tx_ac):
+    """Archive plain non-transcript exon sets for a transcript after its transcript exon set changes.
+
+    This prevents stale primary mappings copied from an older schema from surviving into a
+    newer release when the transcript structure has changed and incoming updated alignments
+    are still pending or skipped.
+    """
+
+    stale_alt_exon_sets = session.query(usam.ExonSet).filter(
+        usam.ExonSet.tx_ac == tx_ac,
+        usam.ExonSet.alt_ac != tx_ac,
+        ~usam.ExonSet.alt_aln_method.contains("/"),
+    ).all()
+
+    for exon_set in stale_alt_exon_sets:
+        _archive_exon_set_record(session, exon_set)
+
+
+def _archive_exon_set_record(session, exon_set):
+    """Archive an exon set by moving it from <method> to <method>/<hash>.
+
+    If the hashed historical row already exists, delete the plain duplicate.
+    """
+
+    es_ess = exon_set.exons_as_str(transcript_order=True)
+    esh = hashlib.sha1(es_ess.encode("ascii")).hexdigest()[:8]
+    alt_aln_method_with_hash = exon_set.alt_aln_method + "/" + esh
+
+    existing = session.query(usam.ExonSet).filter(
+        usam.ExonSet.tx_ac == exon_set.tx_ac,
+        usam.ExonSet.alt_ac == exon_set.alt_ac,
+        usam.ExonSet.alt_aln_method == alt_aln_method_with_hash,
+    )
+
+    assert existing.count() <= 1, (
+        "Expected max 1 archived exon set with key ({tx_ac}, {alt_ac}, {method})".format(
+            tx_ac=exon_set.tx_ac,
+            alt_ac=exon_set.alt_ac,
+            method=alt_aln_method_with_hash,
+        )
+    )
+
+    if existing.count() == 1:
+        logger.warning(
+            "Archived exon set {tx_ac}/{alt_ac} with method {method} already exists; deleting plain duplicate".format(
+                tx_ac=exon_set.tx_ac,
+                alt_ac=exon_set.alt_ac,
+                method=alt_aln_method_with_hash,
+            )
+        )
+        session.query(usam.ExonSet).filter(
+            usam.ExonSet.exon_set_id == exon_set.exon_set_id
+        ).delete(synchronize_session=False)
+        session.flush()
+        return existing[0]
+
+    logger.warning(
+        "Archiving exon set {tx_ac}/{alt_ac} method {old_method} to {new_method}".format(
+            tx_ac=exon_set.tx_ac,
+            alt_ac=exon_set.alt_ac,
+            old_method=exon_set.alt_aln_method,
+            new_method=alt_aln_method_with_hash,
+        )
+    )
+    exon_set.alt_aln_method = alt_aln_method_with_hash
+    session.flush()
+    return exon_set
 
 
 def _create_translation_exceptions(transcript: str, transl_except_list: List[str]) -> List[Dict]:
@@ -868,12 +1339,23 @@ def refresh_matviews(session, opts, cf):
     # rows = list(session.execute(sql))
     # cmds = [ "refresh materialized view {fqrn}".format(fqrn=row["fqrn"]) for row in rows ]
 
+    existing_matviews = {
+        row.matviewname
+        for row in session.execute(
+            text("select matviewname from pg_matviews where schemaname = :schema"),
+            {"schema": usam.schema_name},
+        )
+    }
+
     cmds = [
-        # N.B. Order matters!
-        "refresh materialized view exon_set_exons_fp_mv",
-        "refresh materialized view tx_exon_set_summary_mv",
-        "refresh materialized view tx_def_summary_mv",
-        "refresh materialized view tx_exon_aln_mv",
+        "refresh materialized view " + matview
+        for matview in [
+            "exon_set_exons_fp_mv",
+            "tx_exon_set_summary_mv",
+            "tx_def_summary_mv",
+            "tx_exon_aln_mv",
+        ]
+        if matview in existing_matviews
     ]
 
     for cmd in cmds:
@@ -990,9 +1472,7 @@ def _upsert_exon_set_record(session, tx_ac, alt_ac, strand, method, ess):
                 alt_aln_method_with_hash=alt_aln_method_with_hash,
             )
         )
-        es.alt_aln_method = alt_aln_method_with_hash
-        session.flush()
-        old_es = es
+        old_es = _archive_exon_set_record(session, es)
     else:
         old_es = None
 

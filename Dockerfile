@@ -4,17 +4,19 @@ FROM ubuntu:22.04 as uta
 ARG python_version="3.10"
 
 # list and install dependencies
-ARG dependencies="python${python_version} python3-dev python3-pip rsync git postgresql-client-14 tabix"
+ARG dependencies="python${python_version} python3-dev python3-pip rsync git curl postgresql-client-14 tabix"
 
 RUN apt-get update && apt-get install -y $dependencies && apt-get clean
 
 # install pysam, copy code, and run pip install
 RUN ln -s /usr/bin/python3 /usr/bin/python
 RUN python -m pip install --upgrade pip
-RUN pip install --upgrade setuptools
+RUN pip install --upgrade "setuptools<81"
 RUN pip install pysam
 
 WORKDIR /opt/repos/uta/
+COPY .git ./.git
+COPY README.md ./
 COPY pyproject.toml ./
 COPY etc ./etc
 COPY misc ./misc

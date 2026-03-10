@@ -19,7 +19,11 @@ Usage:
   uta (-C CONF ...) [options] align-exons [--sql SQL]
   uta (-C CONF ...) [options] load-ncbi-seqgene FILE
   uta (-C CONF ...) [options] grant-permissions
+  uta (-C CONF ...) [options] repair-stale-exonset-overlays
+  uta (-C CONF ...) [options] pair-historical-exonsets
   uta (-C CONF ...) [options] refresh-matviews
+  uta (-C CONF ...) [options] validate-exon-set-consistency
+  uta (-C CONF ...) [options] validate-historical-exonset-pairings
   uta (-C CONF ...) [options] analyze
 
 Options:
@@ -81,8 +85,12 @@ def main():
         ("load-sequences",      ul.load_sequences),
         ("load-sql",            ul.load_sql),
         ("load-txinfo",         ul.load_txinfo),
+        ("pair-historical-exonsets", ul.pair_historical_exon_sets),
+        ("repair-stale-exonset-overlays", ul.repair_stale_exon_set_overlays),
         ("refresh-matviews",    ul.refresh_matviews),
         ("shell",               shell),
+        ("validate-exon-set-consistency", ul.validate_exon_set_consistency),
+        ("validate-historical-exonset-pairings", ul.validate_historical_exon_set_pairings),
     ]
 
     opts = docopt.docopt(__doc__, version=uta.__version__)
@@ -101,7 +109,8 @@ def main():
     cf_loaded = dict()
     for conf_fn in opts["--conf"]:
         if conf_fn not in cf_loaded:
-            cf.readfp(open(conf_fn))
+            with open(conf_fn) as f:
+                cf.read_file(f)
             cf_loaded[conf_fn] = True
             logger.info("loaded " + conf_fn)
 
